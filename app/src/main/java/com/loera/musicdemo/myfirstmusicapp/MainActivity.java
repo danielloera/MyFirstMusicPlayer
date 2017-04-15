@@ -3,13 +3,13 @@ package com.loera.musicdemo.myfirstmusicapp;
 import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.AudioManager;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
-import android.net.Uri;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.content.ContextCompat;
 import android.support.v7.app.AppCompatActivity;
@@ -20,6 +20,14 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import com.spotify.sdk.android.authentication.AuthenticationClient;
+import com.spotify.sdk.android.authentication.AuthenticationRequest;
+import com.spotify.sdk.android.authentication.AuthenticationResponse;
+import com.spotify.sdk.android.player.Config;
+import com.spotify.sdk.android.player.Spotify;
+import com.spotify.sdk.android.player.SpotifyPlayer;
+import com.squareup.picasso.Picasso;
+
 import java.io.IOException;
 
 import ir.sohreco.androidfilechooser.ExternalStorageNotAvailableException;
@@ -28,18 +36,29 @@ import ir.sohreco.androidfilechooser.FileChooserDialog;
 
 public class MainActivity extends AppCompatActivity implements FileChooserDialog.ChooserListener{
 
+    private final int SPOTIFY_REQUEST_CODE = 22;
+    private final String CLIENT_ID = "2624d481fecf46369311bd0dd62c1473";
+    private final String TAG = "MainActivity";
+
     private boolean playing, localPlayback;
     private TextView artistAlbumText, songTitleText;
     private ImageView albumArt;
-    private ImageButton playbackButton;
+    private ImageButton playbackButton, sourceButton;
+
+    private SharedPreferences sharedPreferences;
+
+    private String access_token;
+    private boolean spotifyPlayerInitialized;
 
     private MediaPlayer mediaPlayer;
+    private SpotifyPlayer spotifyPlayer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        sharedPreferences = getSharedPreferences("default", MODE_PRIVATE);
         // Gather player components.
         playing = false;
         localPlayback = true;
@@ -47,6 +66,7 @@ public class MainActivity extends AppCompatActivity implements FileChooserDialog
         songTitleText = (TextView) findViewById(R.id.song_title);
         albumArt = (ImageView) findViewById(R.id.album_art);
         playbackButton = (ImageButton) findViewById(R.id.playback_button);
+        sourceButton = (ImageButton) findViewById(R.id.source_button);
 
         mediaPlayer = new MediaPlayer();
         mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
@@ -54,7 +74,90 @@ public class MainActivity extends AppCompatActivity implements FileChooserDialog
         //Ask for permissions to storage for local playback.
         askFilePermission();
         //Setup our Spotify API.
+        access_token = sharedPreferences.getString("access_token", null);
+        if(access_token == null)
+            authenticateSpotify();
+        else
+            setupSpotifyPlayer();
 
+        Intent intent = getIntent();
+        if(intent.getStringExtra("uri") != null) {
+            playSpotifySong(intent);
+            sourceButtonClicked(null);
+            playing = false;
+            playbackButtonClicked(null);
+        }
+    }
+
+    private void playSpotifySong(Intent intent) {
+        String trackTitle = intent.getStringExtra("track");
+        String artist = intent.getStringExtra("artist");
+        String album = intent.getStringExtra("album");
+        String albumURL = intent.getStringExtra("album_art");
+        String uri = intent.getStringExtra("uri");
+
+        songTitleText.setText(trackTitle);
+        artistAlbumText.setText(artist + " - " + album);
+        Picasso.with(getApplicationContext()).load(albumURL).into(albumArt);
+        spotifyPlayer.playUri(uri, 0, 0);
+        playing = true;
+
+    }
+
+    private void authenticateSpotify() {
+
+        final AuthenticationRequest request = new AuthenticationRequest.Builder(CLIENT_ID, AuthenticationResponse.Type.TOKEN, "https://www.google.com")
+                .setScopes(new String[]{"user-read-private", "playlist-read", "playlist-read-private", "streaming"})
+                .build();
+        AuthenticationClient.openLoginActivity(this, SPOTIFY_REQUEST_CODE, request);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
+        super.onActivityResult(requestCode, resultCode, intent);
+
+        // Check if result comes from the correct activity
+        if (requestCode == SPOTIFY_REQUEST_CODE) {
+            AuthenticationResponse response = AuthenticationClient.getResponse(resultCode, intent);
+            switch (response.getType()) {
+                // Response was successful and contains auth token
+                case TOKEN:
+                    access_token = response.getAccessToken();
+                    sharedPreferences.edit().putString("access_token", access_token).apply();
+                    setupSpotifyPlayer();
+                    break;
+
+                // Auth flow returned an error
+                case ERROR:
+                    Log.i(TAG, "Auth error: " + response.getError());
+                    break;
+
+                // Most likely auth flow was cancelled
+                default:
+                    Log.i(TAG, "auth flow cancelled.");
+            }
+        }
+    }
+
+    private void setupSpotifyPlayer() {
+        if (spotifyPlayer == null) {
+            Config playerConfig = new Config(getApplicationContext(), access_token, CLIENT_ID);
+            spotifyPlayer = Spotify.getPlayer(playerConfig, this, new SpotifyPlayer.InitializationObserver() {
+                @Override
+                public void onInitialized(SpotifyPlayer player) {
+                    spotifyPlayerInitialized = true;
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    Log.i(TAG, "Error in initialization: " + error.getMessage());
+                    authenticateSpotify();
+                }
+
+            });
+        } else {
+            spotifyPlayer.login(access_token);
+        }
     }
 
     private void askFilePermission() {
@@ -75,6 +178,9 @@ public class MainActivity extends AppCompatActivity implements FileChooserDialog
             getMusicFile();
         } else {
             // need to open Spotify search to choose new song.
+            Intent intent = new Intent(getApplicationContext(), SpotifySearchActivity.class);
+            intent.putExtra("access_token", access_token);
+            startActivity(intent);
         }
 
     }
@@ -132,7 +238,6 @@ public class MainActivity extends AppCompatActivity implements FileChooserDialog
     }
 
     public void playbackButtonClicked(View view) {
-        ImageButton playbackButton = (ImageButton) view;
         int iconId = 0;
         if(localPlayback) {
             // need to pause or play local media player.
@@ -146,6 +251,13 @@ public class MainActivity extends AppCompatActivity implements FileChooserDialog
 
         } else {
             // need to pause or play Spotify player.
+            if(playing) {
+                iconId = R.drawable.ic_play_button;
+                spotifyPlayer.pause();
+            } else {
+                iconId = R.drawable.ic_pause_button;
+                spotifyPlayer.resume();
+            }
         }
         playing = !playing;
         playbackButton.setImageResource(iconId);
@@ -156,7 +268,6 @@ public class MainActivity extends AppCompatActivity implements FileChooserDialog
         localPlayback = !localPlayback;
 
         // Display new source icon.
-        ImageButton sourceButton = (ImageButton) view;
         int iconId = localPlayback ? R.drawable.ic_folder : R.drawable.ic_spotify;
         sourceButton.setImageResource(iconId);
     }
